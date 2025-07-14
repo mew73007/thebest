@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <title>多人塗鴉板</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0; overflow: hidden;
+    }
+    canvas {
+      display: block;
+      background: #fff;
+    }
+    #controlPanel {
+      position: fixed;
+      top: 10px; left: 10px;
+      z-index: 20;
+      background: #eee;
+      padding: 10px;
+      border-radius: 6px;
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="controlPanel">
+    <div>
+      <button id="loginBtn">登入 Google</button>
+      <span id="userInfo">未登入</span>
+    </div>
+    <div>
+      暱稱：<input type="text" id="nicknameInput" disabled style="width: 180px;">
+    </div>
+    <div style="margin-top: 10px;">
+      X: <input type="number" id="jumpX" style="width: 80px;">
+      Y: <input type="number" id="jumpY" style="width: 80px;">
+      <button id="jumpBtn">傳送</button>
+    </div>
+    <button id="clearBtn" disabled>清除畫布</button>
+    <input type="color" id="colorPicker" value="#000000">
+    <input type="range" id="lineWidthSlider" min="1" max="50" value="3">
+    <span id="coordDisplay">X: 0, Y: 0</span>
+  </div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+    import { getDatabase, ref, push, onChildAdded, onChildRemoved, remove } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+    // Firebase 設定
+    const firebaseConfig = {
+      apiKey: "AIzaSyCxgFG7V7iOImuXZ66iQ_4T4js-PxKwoOA",
+      authDomain: "the-bestbest.firebaseapp.com",
+      projectId: "the-bestbest",
+      storageBucket: "the-bestbest.appspot.com",
+      messagingSenderId: "210749994246",
+      appId: "1:210749994246:web:ee8dd558a9f3454bb45a87",
+      measurementId: "G-WQVZ812CBM"
+    };
+
+    // 初始化 Firebase
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const provider = new GoogleAuthProvider();
+    const db = getDatabase(app);
+    const strokesRef = ref(db, "strokes");
+
+    // DOM 元素
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const loginBtn = document.getElementById("loginBtn");
+    const userInfo = document.getElementById("userInfo");
+    const nicknameInput = document.getElementById("nicknameInput");
+    const clearBtn = document.getElementById("clearBtn");
+    const jumpX = document.getElementById("jumpX");
+    const jumpY = document.getElementById("jumpY");
+    const jumpBtn = document.getElementById("jumpBtn");
+    const colorPicker = document.getElementById("colorPicker");
+    const lineWidthSlider = document.getElementById("lineWidthSlider");
+    const coordDisplay = document.getElementById("coordDisplay");
+
+    // 畫布尺寸
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    // 變數
+    let offsetX = 0, offsetY = 0, scale = 1;
+    let drawing = false, dragging = false;
+    let lastPoint = { x: 0, y: 0 }, lastMouse = { x: 0, y: 0 };
+    let strokes = [];
+    let currentUser = null;
+
+    // 繪圖函式
+    function redraw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.save();
+      ctx.translate(offsetX, offsetY);
+      ctx.scale(scale, scale);
+      for (const stroke of strokes) {
+        if (stroke.length === 0) continue;
+        ctx.beginPath();
+        ctx.strokeStyle = stroke[0].color;
+        ctx.lineWidth = stroke[0].lineWidth;
+        ctx.moveTo(stroke[0].x, stroke[0].y);
+        for (let i = 1; i < stroke.length; i++) {
+          ctx.lineTo(stroke[i].x, stroke[i].y);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // 登入按鈕
+    loginBtn.onclick = () => {
+      signInWithPopup(auth, provider).catch(console.error);
+    };
+
+    // 監聽登入狀態
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        currentUser = user;
+        nicknameInput.value = user.email;
+        userInfo.textContent = `👤 ${user.email}`;
+        clearBtn.disabled = user.email !== "mew73007@gmail.com";
+      } else {
+        currentUser = null;
+        nicknameInput.value = "未登入";
+        userInfo.textContent = "未登入";
+        clearBtn.disabled = true;
+      }
+    });
+
+    // 禁用右鍵選單
+    canvas.addEventListener("contextmenu", e => e.preventDefault());
+
+    // 畫筆事件
+    canvas.addEventListener("mousedown", (e) => {
+      if (!currentUser) return alert("請先登入");
+      const x = (e.clientX - offsetX) / scale;
+      const y = (e.clientY - offsetY) / scale;
+      if (e.button === 0) {
+        drawing = true;
+        lastPoint = { x, y };
+        strokes.push([{ x, y, color: colorPicker.value, lineWidth: lineWidthSlider.value, author: currentUser.email }]);
+      } else {
+        dragging = true;
+        lastMouse = { x: e.clientX, y: e.clientY };
+      }
+    });
+
+    canvas.addEventListener("mousemove", (e) => {
+      const x = (e.clientX - offsetX) / scale;
+      const y = (e.clientY - offsetY) / scale;
+      coordDisplay.textContent = `X: ${x.toFixed(0)}, Y: ${y.toFixed(0)}`;
+
+      if (drawing) {
+        const stroke = strokes[strokes.length - 1];
+        ctx.save();
+        ctx.translate(offsetX, offsetY);
+        ctx.scale(scale, scale);
+        ctx.beginPath();
+        ctx.moveTo(lastPoint.x, lastPoint.y);
+        ctx.lineTo(x, y);
+        ctx.strokeStyle = colorPicker.value;
+        ctx.lineWidth = lineWidthSlider.value;
+        ctx.stroke();
+        ctx.restore();
+
+        stroke.push({ x, y, color: colorPicker.value, lineWidth: lineWidthSlider.value, author: currentUser.email });
+        lastPoint = { x, y };
+      } else if (dragging) {
+        offsetX += e.clientX - lastMouse.x;
+        offsetY += e.clientY - lastMouse.y;
+        lastMouse = { x: e.clientX, y: e.clientY };
+        redraw();
+      }
+    });
+
+    canvas.addEventListener("mouseup", () => {
+      if (drawing && strokes.length > 0) {
+        push(strokesRef, strokes[strokes.length - 1]);
+      }
+      drawing = false;
+      dragging = false;
+    });
+
+    // 滾輪縮放
+    canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const zoom = e.deltaY < 0 ? 1.1 : 0.9;
+      const prevScale = scale;
+      scale *= zoom;
+      const mx = e.clientX;
+      const my = e.clientY;
+      offsetX -= (mx - offsetX) * (scale / prevScale - 1);
+      offsetY -= (my - offsetY) * (scale / prevScale - 1);
+      redraw();
+    }, { passive: false });
+
+    // 傳送座標按鈕
+    jumpBtn.onclick = () => {
+      const x = parseInt(jumpX.value);
+      const y = parseInt(jumpY.value);
+      if (!isNaN(x) && !isNaN(y)) {
+        offsetX = -x * scale + canvas.width / 2;
+        offsetY = -y * scale + canvas.height / 2;
+        redraw();
+      }
+    };
+
+    // 管理員清除畫布
+    clearBtn.onclick = () => {
+      if (currentUser?.email === "mew73007@gmail.com") {
+        remove(strokesRef)
+          .then(() => {
+            strokes = [];
+            redraw();
+          })
+          .catch(err => alert("清除畫布失敗：" + err.message));
+      } else {
+        alert("只有管理員可以清除！");
+      }
+    };
+
+    // 雙擊顯示作者
+    canvas.addEventListener("dblclick", (e) => {
+      const x = (e.clientX - offsetX) / scale;
+      const y = (e.clientY - offsetY) / scale;
+      for (const stroke of strokes) {
+        for (const pt of stroke) {
+          const dx = pt.x - x, dy = pt.y - y;
+          if (Math.sqrt(dx * dx + dy * dy) < 30) {
+            alert(`作者：${pt.author}`);
+            return;
+          }
+        }
+      }
+      alert("沒找到附近的筆畫");
+    });
+
+    // 監聽 Firebase 新增筆劃
+    onChildAdded(strokesRef, (snapshot) => {
+      const stroke = snapshot.val();
+      if (Array.isArray(stroke)) {
+        strokes.push(stroke);
+        redraw();
+      }
+    });
+
+    // 監聽 Firebase 筆劃刪除（整個節點刪除時觸發）
+    onChildRemoved(strokesRef, (snapshot) => {
+      strokes = [];
+      redraw();
+    });
+  </script>
+</body>
+</html>
